@@ -1,0 +1,11 @@
+.sonar-scanner-template:
+  script:
+    - echo "Running SonarScanner for project $SONAR_PROJECT_NAME with version $PROJECT_VERSION"
+    - sonar-scanner -Dsonar.host.url=$SONAR_HOST_URL -Dsonar.projectKey=$SONAR_PROJECT_KEY -D"sonar.projectName=$SONAR_PROJECT_NAME" -D"sonar.projectVersion=$PROJECT_VERSION" -Dsonar.login=$SONAR_TOKEN
+
+  allow_failure: true
+
+
+
+
+

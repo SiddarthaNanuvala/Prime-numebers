@@ -1,0 +1,184 @@
+# Include external YAML file for SonarQube analysis
+include:
+  - local: 'templates/.sonar-gitlab-ci.yml'
+
+# Define pipeline execution rules
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH =~ /^feature\/|^hotfix\//
+      when: always  # Run pipeline on main, feature, and hotfix branches
+    - if: $CI_COMMIT_TAG
+      variables:
+        PROJECT_VERSION: "${CI_COMMIT_TAG}"  # Use tag version if available
+      when: always
+    - when: never  # Prevent pipeline execution in other cases
+
+# Define the pipeline stages
+stages:
+  - Static Analysis
+  - Tests
+  - Coverage
+  - Quality Gate
+  - Release
+
+# Default settings for all jobs
+default:
+  image:
+    name: registry.smile.fr/formation-devsecops-embedded-iot/runner:2.3
+  before_script:
+    - echo "=== Start of Job ==="
+  after_script:
+    - echo "=== End of Job ==="
+
+# Define project-wide variables
+variables:
+  APP_VERSION_BASE: "1.0"
+  APP_VERSION: "${APP_VERSION_BASE}_${CI_COMMIT_SHORT_SHA}"
+  SONAR_PROJECT_KEY: "team-CCC1-deploy-dudes-prime-number"
+  SONAR_PROJECT_NAME: "TEAM-CCC1-Deploy Dudes-PRIME-NUMBER"
+  SONAR_HOST_URL: "https://devinci-sonar.k8s.smile.fr/"
+  SONAR_TOKEN: "sqa_b6fd8d87ef20382a975b9c5fa621c812bdb72010"
+  PROJECT_VERSION: "${CI_COMMIT_SHORT_SHA}"  # Default versioning based on commit hash
+
+#  Flake8 - Static Code Analysis
+flake8:
+  stage: Static Analysis
+  script:
+    - pip install flake8
+    - echo "Running Flake8 static analysis"
+    - flake8 src/prime_number.py --exit-zero --output-file=flake8-report.txt
+  artifacts:
+    paths:
+      - flake8-report.txt  # Store the Flake8 report as an artifact
+  allow_failure: true  # Allow pipeline to continue even if Flake8 fails
+
+#  Pylint - Additional Static Code Analysis
+pylint:
+  stage: Static Analysis
+  script:
+    - pip install pylint
+    - echo "Running pylint static analysis"
+    - pylint src/prime_number.py --exit-zero --output-format=parseable > pylint-report.txt
+  artifacts:
+    paths:
+      - pylint-report.txt  # Store the Pylint report as an artifact
+  allow_failure: true  # Allow pipeline to continue even if Pylint fails
+
+#  Bandit - Security Code Analysis
+bandit:
+  stage: Static Analysis
+  script:
+    - pip install bandit
+    - echo "Running Bandit security analysis"
+    - bandit -r src/prime_number.py -f html -o bandit-report.html  # Run Bandit on the source code and output the result as an HTML report
+  artifacts:
+    paths:
+      - bandit-report.html  # Store the Bandit report as an artifact
+  allow_failure: true  # Allow pipeline to continue even if Bandit finds security issues
+
+#  Unit Testing - Pytest
+unit_tests:
+  stage: Tests
+  script:
+    - pip install pytest
+    - echo "Running unit tests"
+    - pytest --junitxml=pytest-report.xml tst/test_prime_number.py
+  artifacts:
+    when: always  # Always store test reports
+    paths:
+      - pytest-report.xml
+    reports:
+      junit: pytest-report.xml  # Upload JUnit XML test report
+
+#  Code Coverage - Pytest-Cov
+coverage:
+  stage: Coverage
+  script:
+    - pip install pytest pytest-cov
+    - echo "Running coverage tests"
+    - coverage run -m pytest --junitxml=pytest-report.xml tst/test_prime_number.py
+    - coverage xml -o coverage-report.xml
+  coverage: '/(?i)total.*? (100(?:\.0+)?\%|[1-9]?\d(?:\.\d+)?\%)$/'
+  artifacts:
+    paths:
+      - coverage-report.xml  # Store the coverage report as an artifact
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage-report.xml  # Upload coverage report in Cobertura format
+
+#  SonarQube Analysis
+sonar-scanner-job:
+  stage: Quality Gate
+  extends: .sonar-scanner-template
+  needs:
+    - job: flake8
+      artifacts: true
+    - job: pylint
+      artifacts: true
+    - job: bandit
+      artifacts: true  # Include Bandit report as an artifact for SonarQube
+    - job: unit_tests
+      artifacts: true
+    - job: coverage
+      artifacts: true
+  variables:
+    PROJECT_VERSION: "${PROJECT_VERSION}"  # Dynamically pass project version
+
+#  Release Job
+release_job:
+  stage: Release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: always
+  script:
+    - echo "Running release job for $CI_COMMIT_SHA"
+  needs:
+    - sonar-scanner-job
+  release:
+    tag_name: "v0.$CI_PIPELINE_IID"
+    description: "Release v0.$CI_PIPELINE_IID"
+    ref: '$CI_COMMIT_SHA'  # Release based on the latest commit SHA
+    # DEPLOY JOB
+deploy:
+  stage: Release
+  script:
+    - echo " Deploying to $CI_ENVIRONMENT_NAME environment"
+    - echo " Deployment successful"
+  environment:
+    name: $CI_ENVIRONMENT_NAME
+  rules:
+    # 20.3 Only deploy if there's a tag and NOT on develop branch
+    - if: '$CI_COMMIT_BRANCH != "develop" && $CI_COMMIT_TAG'
+      when: always
+    - when: never
+  variables:
+    # 20.2 Dynamically set environment name
+    CI_ENVIRONMENT_NAME: >
+      ${CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || CI_COMMIT_BRANCH =~ /^hotfix\// ? "Production" : "Test"}
+
+# SIMULATED TEST JOB (Optional but added for pipeline flow)
+test-deployment:
+  stage: Tests
+  script:
+    - echo " Running simulated deployment tests"
+    - echo " Tests on deployment passed"
+  rules:
+    - if: '$CI_COMMIT_TAG'
+      when: always
+    - when: never
+
+# ROLLBACK JOB
+rollback:
+  stage: Release
+  script:
+    - echo " Rolling back deployment in $CI_ENVIRONMENT_NAME environment"
+    - echo " Rollback completed successfully"
+  environment:
+    name: $CI_ENVIRONMENT_NAME
+  rules:
+    - when: manual  # Only runs manually
+
